@@ -39,20 +39,9 @@
 // Wrap/Unwrap keys
 bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const ByteString& in, ByteString& out)
 {
-	// Check key bit length; AES only supports 128, 192 or 256 bit keys
-	if ((key->getBitLen() != 128) &&
-	    (key->getBitLen() != 192) &&
-	    (key->getBitLen() != 256))
-	{
-		ERROR_MSG("Invalid AES key length (%d bits)", key->getBitLen());
-
-		return false;
-	}
-
-	// Determine the wrapping mode
+	// RFC 3394 input checks do not apply to RFC 5649 mode with padding
 	if (mode == SymWrap::AES_KEYWRAP)
 	{
-		// RFC 3394 AES key wrap
 		if (in.size() < 16)
 		{
 			ERROR_MSG("key data to wrap too small");
@@ -65,58 +54,59 @@ bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const B
 
 			return false;
 		}
-
-		AES_KEY aesKey;
-		if (AES_set_encrypt_key(key->getKeyBits().const_byte_str(),
-					key->getBitLen(), &aesKey))
-		{
-			ERROR_MSG("fail to setup AES wrapping key");
-
-			return false;
-		}
-		out.resize(in.size() + 8);
-		if (AES_wrap_key(&aesKey, NULL, &out[0], in.const_byte_str(), in.size()) != (int)out.size())
-		{
-			ERROR_MSG("AES key wrap failed");
-
-			out.wipe();
-			return false;
-		}
-
-		return  true;
 	}
-#ifdef HAVE_AES_KEY_WRAP_PAD
-	else if (mode == SymWrap::AES_KEYWRAP_PAD)
+
+	// Determine the cipher method
+	const EVP_CIPHER* cipher = getWrapCipher(mode, key);
+	if (cipher == NULL)
 	{
-		// RFC 5649 AES key wrap with pad
-		AES_KEY aesKey;
-		if (AES_set_encrypt_key(key->getKeyBits().const_byte_str(),
-					key->getBitLen(), &aesKey))
-		{
-			ERROR_MSG("fail to setup AES wrapping key");
-
-			return false;
-		}
-		out.resize(in.size() + 16);
-		int ret = AES_wrap_key_withpad(&aesKey, NULL, &out[0], in.const_byte_str(), in.size());
-		if (ret <= 0)
-		{
-			ERROR_MSG("AES key wrap failed");
-
-			out.wipe();
-			return false;
-		}
-		out.resize(ret);
-
-		return  true;
-	}
-#endif
-	else
-	{
-		ERROR_MSG("unknown AES key wrap mode %i", mode);
-
+		ERROR_MSG("Failed to get EVP wrap cipher");
 		return false;
 	}
+
+	// Allocate the EVP context
+	EVP_CIPHER_CTX* pWrapCTX = (EVP_CIPHER_CTX*) salloc(sizeof(EVP_CIPHER_CTX));
+	if (pWrapCTX == NULL)
+	{
+		ERROR_MSG("Failed to allocate space for EVP_CIPHER_CTX");
+		return false;
+	}
+	EVP_CIPHER_CTX_init(pWrapCTX);
+	EVP_CIPHER_CTX_set_flags(pWrapCTX, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+
+	int rv = EVP_EncryptInit_ex(pWrapCTX, cipher, NULL, (unsigned char*) key->getKeyBits().const_byte_str(), NULL);
+	if (rv)
+		// Padding is handled by cipher mode separately
+		rv = EVP_CIPHER_CTX_set_padding(pWrapCTX, 0);
+	if (!rv)
+	{
+		ERROR_MSG("Failed to initialise EVP encrypt operation");
+
+		EVP_CIPHER_CTX_cleanup(pWrapCTX);
+		sfree(pWrapCTX);
+		return false;
+	}
+
+	// 1 input byte could be expanded to two AES blocks
+	out.resize(in.size() + 2 * EVP_CIPHER_CTX_block_size(pWrapCTX) - 1);
+	int outLen = 0;
+	int curBlockLen = 0;
+	rv = EVP_EncryptUpdate(pWrapCTX, &out[0], &curBlockLen, in.const_byte_str(), in.size());
+	if (rv == 1) {
+		outLen = curBlockLen;
+		rv = EVP_EncryptFinal_ex(pWrapCTX, &out[0], &curBlockLen);
+	}
+	if (rv != 1)
+	{
+		ERROR_MSG("Failed EVP encrypt operation during key wrapping");
+
+		EVP_CIPHER_CTX_cleanup(pWrapCTX);
+		sfree(pWrapCTX);
+		return false;
+	}
+	outLen += curBlockLen;
+	out.resize(outLen);
+	return true;
 }
 
 bool OSSLAES::unwrapKey(const SymmetricKey* key, const SymWrap::Type mode, const ByteString& in, ByteString& out)
@@ -255,6 +245,52 @@ const EVP_CIPHER* OSSLAES::getCipher() const
 	}
 
 	ERROR_MSG("Invalid AES cipher mode %i", currentCipherMode);
+
+	return NULL;
+}
+
+const EVP_CIPHER* OSSLAES::getWrapCipher(const SymWrap::Type mode, const SymmetricKey* key) const
+{
+	if (key == NULL)
+		return NULL;
+
+	// Check currentKey bit length; AES only supports 128, 192 or 256 bit keys
+	if ((key->getBitLen() != 128) &&
+	    (key->getBitLen() != 192) &&
+            (key->getBitLen() != 256))
+	{
+		ERROR_MSG("Invalid AES currentKey length (%d bits)", key->getBitLen());
+
+		return NULL;
+	}
+
+	// Determine the cipher mode
+	if (mode == SymWrap::AES_KEYWRAP)
+	{
+		switch(key->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_wrap();
+			case 192:
+				return EVP_aes_192_wrap();
+			case 256:
+				return EVP_aes_256_wrap();
+		};
+	}
+	else if (mode == SymWrap::AES_KEYWRAP_PAD)
+	{
+		switch(key->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_wrap_pad();
+			case 192:
+				return EVP_aes_192_wrap_pad();
+			case 256:
+				return EVP_aes_256_wrap_pad();
+		};
+	}
+
+	ERROR_MSG("Invalid AES cipher wrap mode %i", mode);
 
 	return NULL;
 }

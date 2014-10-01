@@ -55,6 +55,7 @@ public:
 protected:
 	// Return the right EVP cipher for the operation
 	virtual const EVP_CIPHER* getCipher() const;
+	const EVP_CIPHER* getWrapCipher(const SymWrap::Type mode, const SymmetricKey* key) const;
 };
 
 #endif // !_SOFTHSM_V2_OSSLAES_H

@@ -109,6 +109,7 @@ protected:
 
 	// The current cipher mode
 	SymMode::Type currentCipherMode;
+	SymWrap::Type currentWrapMode;
 
 	// The current padding
 	bool currentPaddingMode;
