@@ -37,6 +37,7 @@
 #include "salloc.h"
 
 // Wrap/Unwrap keys
+
 bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const ByteString& in, ByteString& out)
 {
 	// RFC 3394 input checks do not apply to RFC 5649 mode with padding
@@ -55,7 +56,11 @@ bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const B
 			return false;
 		}
 	}
+	return wrapUnwrapKey(key, mode, in, out, 1);
+}
 
+bool OSSLAES::wrapUnwrapKey(const SymmetricKey* key, const SymWrap::Type mode, const ByteString& in, ByteString& out, const int wrap)
+{
 	// Determine the cipher method
 	const EVP_CIPHER* cipher = getWrapCipher(mode, key);
 	if (cipher == NULL)
@@ -74,7 +79,7 @@ bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const B
 	EVP_CIPHER_CTX_init(pWrapCTX);
 	EVP_CIPHER_CTX_set_flags(pWrapCTX, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
 
-	int rv = EVP_EncryptInit_ex(pWrapCTX, cipher, NULL, (unsigned char*) key->getKeyBits().const_byte_str(), NULL);
+	int rv = EVP_CipherInit_ex(pWrapCTX, cipher, NULL, (unsigned char*) key->getKeyBits().const_byte_str(), NULL, wrap);
 	if (rv)
 		// Padding is handled by cipher mode separately
 		rv = EVP_CIPHER_CTX_set_padding(pWrapCTX, 0);
@@ -91,10 +96,10 @@ bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const B
 	out.resize(in.size() + 2 * EVP_CIPHER_CTX_block_size(pWrapCTX) - 1);
 	int outLen = 0;
 	int curBlockLen = 0;
-	rv = EVP_EncryptUpdate(pWrapCTX, &out[0], &curBlockLen, in.const_byte_str(), in.size());
+	rv = EVP_CipherUpdate(pWrapCTX, &out[0], &curBlockLen, in.const_byte_str(), in.size());
 	if (rv == 1) {
 		outLen = curBlockLen;
-		rv = EVP_EncryptFinal_ex(pWrapCTX, &out[0], &curBlockLen);
+		rv = EVP_CipherFinal_ex(pWrapCTX, &out[0], &curBlockLen);
 	}
 	if (rv != 1)
 	{
@@ -111,6 +116,8 @@ bool OSSLAES::wrapKey(const SymmetricKey* key, const SymWrap::Type mode, const B
 
 bool OSSLAES::unwrapKey(const SymmetricKey* key, const SymWrap::Type mode, const ByteString& in, ByteString& out)
 {
+	return wrapUnwrapKey(key, mode, in, out, 0);
+	/*
 	// Check key bit length; AES only supports 128, 192 or 256 bit keys
 	if ((key->getBitLen() != 128) &&
 	    (key->getBitLen() != 192) &&
@@ -202,6 +209,7 @@ bool OSSLAES::unwrapKey(const SymmetricKey* key, const SymWrap::Type mode, const
 
 		return false;
 	}
+	*/
 }
 
 const EVP_CIPHER* OSSLAES::getCipher() const
